@@ -9,6 +9,7 @@
 - ✅ 服务器离线自动点 Start 启动
 - ✅ 自动点击续期，等待 Cloudflare Turnstile 验证自动通过
 - ✅ WxPusher 推送服务器状态 + 到期时间
+- ✅ Hysteria2 代理（绕过 GitHub Actions IP 限制）
 
 ## 部署到 GitHub Actions
 
@@ -25,6 +26,7 @@
 | `ZAMPTO_SERVER_ID` | 服务器 ID（URL 中的数字，如 `XXXX`）|
 | `WXPUSHER_TOKEN` | WxPusher App Token |
 | `WXPUSHER_UID` | WxPusher 用户 UID |
+| `HY2_CONFIG` | Hysteria2 客户端配置（JSON 格式，见下方说明）|
 
 ### 3. 获取 Server ID
 
@@ -32,6 +34,25 @@
 ```
 https://dash.zampto.net/server?id=XXXX
 ```
+
+### 4. 配置 Hysteria2 代理
+
+`HY2_CONFIG` Secret 填入 Hysteria2 客户端的 JSON 配置，格式示例：
+
+```json
+{
+  "server": "your-hy2-server:443",
+  "auth": "your-password",
+  "socks5": {
+    "listen": "127.0.0.1:1080"
+  },
+  "tls": {
+    "insecure": false
+  }
+}
+```
+
+> ⚠️ 代理监听地址必须为 `127.0.0.1:1080`（脚本默认通过此地址访问）。
 
 ## 推送消息示例
 
@@ -50,5 +71,6 @@ Last Renewed: 已自动续期
 ## 注意事项
 
 - 续期的 CF Turnstile 由 CloakBrowser 自动处理
+- Hysteria2 代理在每次 Actions 运行时自动下载最新版并启动，无需手动维护
 - 每次运行保存截图+录像（3 天）供调试
 - 服务器离线才触发 Start，不影响正在运行的服务器

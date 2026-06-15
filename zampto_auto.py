@@ -50,10 +50,49 @@ def wxpush(content: str):
         log.warning(f"📨 WxPusher 推送异常: {e}")
 
 # ---------- 工具函数 ----------
+def redact_sensitive_info(page):
+    """
+    截图前用 JS 将页面上的敏感信息替换为 ***，
+    避免账号、邮箱、服务器地址等出现在截图文件中。
+    覆盖范围：
+      - 首页 info-card 里的 username / user_id / email 文本
+      - Console 页的服务器地址（#addressValue）
+    """
+    try:
+        page.evaluate("""() => {
+            // ── 1. 首页 user-info-grid 里的三张 info-card ──────────────────
+            // 结构: div.user-info-grid > div.info-card > div.info-content > p
+            var cards = document.querySelectorAll('.user-info-grid .info-card .info-content');
+            cards.forEach(function(card) {
+                // <p> 直接子节点（username / user_id 值）
+                var p = card.querySelector('p');
+                if (p) p.textContent = '***';
+                // email 用了 <p style="font-size:...">
+                var pStyle = card.querySelector('p[style]');
+                if (pStyle) pStyle.textContent = '***';
+            });
+
+            // ── 2. Console 页服务器地址 ──────────────────────────────────
+            // <div class="info-card-value" id="addressValue">node11.zampto.net:40114</div>
+            var addrEl = document.getElementById('addressValue');
+            if (addrEl) addrEl.textContent = '***';
+
+            // 同时覆盖所有可能含地址的 .info-card-value（防止多个地址字段）
+            document.querySelectorAll('.info-card-value').forEach(function(el) {
+                if (/\\.zampto\\.net/.test(el.textContent)) {
+                    el.textContent = '***';
+                }
+            });
+        }""")
+    except Exception as e:
+        log.warning(f"脱敏 JS 执行失败（不影响截图）: {e}")
+
+
 def take_screenshot(page, name):
     try:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         path = str(SCREENSHOT_DIR / f"{ts}_{name}.png")
+        redact_sensitive_info(page)   # 截图前先脱敏
         page.screenshot(path=path, full_page=False)
         log.info(f"📸 截图: {path}")
     except Exception as e:
@@ -714,7 +753,14 @@ def renew_server(page, server_id: str, expiry_before: str) -> bool:
         dismiss_all_popups(page)
         time.sleep(1)
     except Exception as e:
-        log.warning(f"续期后刷新页面失败: {e}")
+        log.warning(f"续期后刷新页面失败: {e}，改用 goto 重新导航...")
+        try:
+            page.goto(f"{BASE_URL}/server?id={server_id}", timeout=30000, wait_until="domcontentloaded")
+            time.sleep(3)
+            dismiss_all_popups(page)
+            time.sleep(1)
+        except Exception as e2:
+            log.warning(f"续期后重新导航也失败: {e2}")
 
     # ✅ 用 expiry 是否增加来判断是否真正续期成功，不依赖弹窗状态
     info_after = page.evaluate("""() => {
@@ -729,8 +775,10 @@ def renew_server(page, server_id: str, expiry_before: str) -> bool:
 
     log.info(f"续期前 expiry 分钟数: {minutes_before}, 续期后: {minutes_after}")
 
-    # 成功条件：续期后分钟数 > 续期前分钟数（时间增加了说明续期生效）
-    if minutes_after > minutes_before:
+    # 成功条件：
+    # 1. 续期后分钟数 > 续期前（普通情况，时间增加）
+    # 2. 续期前是 Expired（-1），续期后读到有效时间（>0）
+    if minutes_after > 0 and (minutes_after > minutes_before or minutes_before <= 0):
         log.info(f"✅ 续期成功！expiry: {expiry_before} → {info_after}（增加了 {minutes_after - minutes_before} 分钟）")
         return True
 
@@ -776,7 +824,23 @@ def main():
 
         log.info(f"服务器状态: {status} | 到期: {expiry}")
 
-        # 4. 如果服务器已停止，先启动
+        # 4. 续期（SKIP_RENEW=true 时跳过，只做启动）
+        if SKIP_RENEW:
+            log.info("⏭️ SKIP_RENEW=true，跳过续期步骤（Uptime Kuma 紧急启动模式）")
+            renewed = False
+        else:
+            renewed = renew_server(page, SERVER_ID, expiry_before=expiry)
+
+        # 5. 续期后重新读取最新 expiry 和 lastRenewed
+        new_expiry = expiry
+        if renewed:
+            time.sleep(3)
+            info2 = get_server_info(page, SERVER_ID)
+            new_expiry = info2.get("expiry") or expiry
+            last_renew = info2.get("lastRenewed") or last_renew
+            log.info(f"续期后到期信息: {new_expiry}")
+
+        # 6. 如果服务器已停止，再启动
         started = False
         if "stopped" in status.lower() or "offline" in status.lower():
             log.info("🔴 服务器已停止，尝试启动...")
@@ -787,21 +851,6 @@ def main():
             else:
                 status = "Start Failed / Timeout"
                 log.warning("⚠️ 服务器启动失败或超时，未能确认 Running")
-
-        # 5. 续期（SKIP_RENEW=true 时跳过，只做启动）
-        if SKIP_RENEW:
-            log.info("⏭️ SKIP_RENEW=true，跳过续期步骤（Uptime Kuma 紧急启动模式）")
-            renewed = False
-        else:
-            renewed = renew_server(page, SERVER_ID, expiry_before=expiry)
-
-        # 6. 续期后重新读取最新 expiry
-        new_expiry = expiry
-        if renewed:
-            time.sleep(3)
-            info2 = get_server_info(page, SERVER_ID)
-            new_expiry = info2.get("expiry") or expiry
-            log.info(f"续期后到期信息: {new_expiry}")
 
         # 7. 推送
         lines = ["🚨 Zampto 紧急启动报告" if SKIP_RENEW else "🖥️ Zampto 服务器日报"]
